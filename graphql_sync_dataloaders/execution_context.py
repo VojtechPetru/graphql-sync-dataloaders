@@ -70,6 +70,8 @@ class DeferredExecutionContext(ExecutionContext):
         results: AwaitableOrValue[Dict[str, Any]] = {}
 
         unresolved = 0
+        future = SyncFuture()
+
         for response_name, field_nodes in fields.items():
             field_path = Path(path, response_name, parent_type.name)
             result = self.execute_field(

@@ -81,6 +81,9 @@ class SyncFuture:
             except Exception as e:
                 ret.set_exception(e)
 
-        self.add_done_callback(call_and_resolve)
+        if self._state == _FINISHED:
+            call_and_resolve(self.result())
+        else:
+            self.add_done_callback(call_and_resolve)
 
         return ret

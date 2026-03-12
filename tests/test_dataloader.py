@@ -1,3 +1,4 @@
+import threading
 from unittest import mock
 from unittest.mock import Mock
 from functools import partial
@@ -14,9 +15,7 @@ from graphql import (
 
 from graphql_sync_dataloaders import DeferredExecutionContext, SyncDataLoader
 
-graphql_sync_deferred = partial(
-    graphql_sync, execution_context_class=DeferredExecutionContext
-)
+graphql_sync_deferred = partial(graphql_sync, execution_context_class=DeferredExecutionContext)
 
 
 def test_deferred_execution():
@@ -483,3 +482,48 @@ def test_chaining_dataloader():
     assert mock_load_fn.call_count == 2
     assert mock_load_fn.call_args_list[0].args[0] == ["1", "2"]
     assert mock_load_fn.call_args_list[1].args[0] == ["3"]
+
+
+def test_concurrent_threads_are_isolated():
+    """DataloaderBatchCallbacks must isolate callbacks per thread.
+
+    Without thread-local callback storage, _callbacks is a plain list shared
+    across all threads. When two threads add callbacks concurrently, both
+    threads see the combined list. One thread's run_all_callbacks then steals
+    the other's callbacks, leaving SyncFutures permanently PENDING.
+
+    This test verifies isolation at the DataloaderBatchCallbacks level:
+    each thread should only see callbacks it added itself.
+    """
+    from graphql_sync_dataloaders.sync_dataloader import dataloader_batch_callbacks
+
+    add_barrier = threading.Barrier(2, timeout=5)
+    check_barrier = threading.Barrier(2, timeout=5)
+    visible_counts = {}
+
+    def thread_fn(name):
+        # Each thread adds exactly one callback
+        dataloader_batch_callbacks.add_callback(lambda: name)
+        # Wait until both threads have added their callback
+        add_barrier.wait()
+        # Check how many callbacks are visible from this thread
+        visible_counts[name] = len(dataloader_batch_callbacks._callbacks)
+        check_barrier.wait()
+        # Clean up: drain this thread's callbacks so they don't leak
+        dataloader_batch_callbacks.run_all_callbacks()
+
+    t1 = threading.Thread(target=thread_fn, args=("t1",))
+    t2 = threading.Thread(target=thread_fn, args=("t2",))
+    t1.start()
+    t2.start()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+
+    # Without thread-local: both threads see 2 (shared list)
+    # With thread-local: each thread sees only 1 (its own)
+    assert visible_counts["t1"] == 1, (
+        f"t1 saw {visible_counts['t1']} callbacks, expected 1 — callbacks are leaking across threads"
+    )
+    assert visible_counts["t2"] == 1, (
+        f"t2 saw {visible_counts['t2']} callbacks, expected 1 — callbacks are leaking across threads"
+    )

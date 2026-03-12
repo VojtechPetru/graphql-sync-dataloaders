@@ -1,3 +1,4 @@
+import threading
 from typing import List, Callable
 from graphql.pyutils import is_collection
 
@@ -9,11 +10,23 @@ class DataloaderBatchCallbacks:
     Singleton that stores all the batched callbacks for all dataloaders. This is
     equivalent to the async `loop.call_soon` functionality and enables the
     batching functionality of dataloaders.
+
+    Uses thread-local storage so that each thread (e.g., Django's threaded
+    runserver) gets its own isolated callback list. Without this, concurrent
+    threads share a single list, and one thread's dispatch loop can steal
+    another's callbacks, leaving SyncFutures permanently PENDING.
     """
-    _callbacks: List[Callable]
 
     def __init__(self) -> None:
-        self._callbacks = []
+        self._local = threading.local()
+
+    @property
+    def _callbacks(self) -> List[Callable]:
+        try:
+            return self._local.callbacks
+        except AttributeError:
+            self._local.callbacks = []
+            return self._local.callbacks
 
     def add_callback(self, callback: Callable):
         self._callbacks.append(callback)

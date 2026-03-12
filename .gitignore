@@ -159,3 +159,5 @@ provisioning/ansible/roles/community_roles/
 
 ecdsa-p521-private.pem
 ecdsa-p521-public.pem
+
+poetry.toml

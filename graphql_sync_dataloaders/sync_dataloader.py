@@ -33,8 +33,14 @@ class DataloaderBatchCallbacks:
 
     def run_all_callbacks(self):
         callbacks = self._callbacks
-        while callbacks:
-            callbacks.pop(0)()
+        try:
+            while callbacks:
+                callbacks.pop(0)()
+        except Exception:
+            # A callback raised; drop the rest so they don't leak into the next
+            # operation on this thread, then re-raise for the caller.
+            callbacks.clear()
+            raise
 
 
 dataloader_batch_callbacks = DataloaderBatchCallbacks()
@@ -72,14 +78,13 @@ class SyncDataLoader:
         if not is_collection(values) or len(keys) != len(values):
             raise ValueError("The batch loader does not return an expected result")
 
-        try:
-            for (key, future), value in zip(queue, values):
-                if isinstance(value, Exception):
-                    future.set_exception(value)
-                else:
-                    future.set_result(value)
-        except Exception as error:
-            for key, future in queue:
-                self.clear(key)
-                if not future.done():
-                    future.set_exception(error)
+        for (_key, future), value in zip(queue, values):
+            if future.done():
+                # Already resolved by an earlier future's completion cascade.
+                continue
+            if isinstance(value, Exception):
+                future.set_exception(value)
+            else:
+                # set_result runs completion callbacks synchronously; let a
+                # raised error propagate rather than swallowing it.
+                future.set_result(value)

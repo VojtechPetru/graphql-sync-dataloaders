@@ -51,7 +51,16 @@ class DeferredExecutionContext(ExecutionContext):
     ) -> Optional[AwaitableOrValue[Any]]:
         result = super().execute_operation(operation, root_value)
 
-        dataloader_batch_callbacks.run_all_callbacks()
+        try:
+            dataloader_batch_callbacks.run_all_callbacks()
+        except GraphQLError as error:
+            # A field completion error (e.g. a non-nullable field resolving to
+            # null, or an unexpected type from a dataloader) propagated out of a
+            # deferred callback. Standard graphql-core records such an error and
+            # nullifies the data; mirror that instead of hiding the real cause
+            # behind a generic "failed to complete" error.
+            self.errors.append(error)
+            return None
 
         if isinstance(result, SyncFuture):
             if not result.done():

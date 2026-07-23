@@ -637,15 +637,9 @@ def test_list_with_nullable_items_reports_error_for_failing_item_only():
 
 
 def test_list_of_non_null_items_with_wrong_type_reports_error():
-    """A list of non-null items receiving a wrong-typed object from a
-    dataloader (its is_type_of check fails) reports the real type error.
-
-    Note the data shape: standard graphql-core nullifies only the nullable
-    ``users`` list, giving ``{"users": None}``. This executor propagates a
-    non-null failure whose value came from a dataloader all the way to the
-    operation root, so the whole ``data`` becomes None. The error itself
-    (message and path) is reported the same either way; only the extent of
-    the nullification differs.
+    """A wrong-typed object supplied for a non-null list item reports the type
+    error and nullifies only the nullable list that contains it. Sibling
+    fields of the operation keep their values, matching standard graphql-core.
     """
     users = {
         "1": {"kind": "user", "name": "ok"},
@@ -669,18 +663,58 @@ def test_list_of_non_null_items_with_wrong_type_reports_error():
                 "users": GraphQLField(
                     GraphQLList(GraphQLNonNull(user)), resolve=resolve_users
                 ),
+                "status": GraphQLField(GraphQLString, resolve=lambda *_: "ok"),
             },
         )
     )
 
-    result = graphql_sync_deferred(schema, "{ users { name } }")
+    result = graphql_sync_deferred(schema, "{ users { name } status }")
 
-    # Over-nullified vs the spec's {"users": None} — see the docstring.
-    assert result.data is None
+    assert result.data == {"users": None, "status": "ok"}
     assert result.errors is not None
     assert len(result.errors) == 1
     assert "Expected value of type 'User'" in result.errors[0].message
     assert result.errors[0].path == ["users", 1]
+
+
+def test_non_null_child_error_nullifies_only_nullable_parent():
+    """A non-null field backed by a dataloader that resolves to null nullifies
+    only its nearest nullable ancestor (the parent object), not the whole
+    operation. Sibling fields keep their values, matching standard
+    graphql-core.
+    """
+    dataloader = SyncDataLoader(lambda keys: [None for _ in keys])
+
+    def resolve_name(_, __):
+        return dataloader.load("k")
+
+    user = GraphQLObjectType(
+        name="User",
+        fields={
+            "name": GraphQLField(GraphQLNonNull(GraphQLString), resolve=resolve_name),
+        },
+    )
+
+    schema = GraphQLSchema(
+        query=GraphQLObjectType(
+            name="Query",
+            fields={
+                "user": GraphQLField(user, resolve=lambda *_: {}),
+                "status": GraphQLField(GraphQLString, resolve=lambda *_: "ok"),
+            },
+        )
+    )
+
+    result = graphql_sync_deferred(schema, "{ user { name } status }")
+
+    assert result.data == {"user": None, "status": "ok"}
+    assert result.errors is not None
+    assert len(result.errors) == 1
+    assert (
+        result.errors[0].message
+        == "Cannot return null for non-nullable field User.name."
+    )
+    assert result.errors[0].path == ["user", "name"]
 
 
 def test_non_null_list_with_null_item_reports_error():

@@ -65,9 +65,63 @@ class DeferredExecutionContext(ExecutionContext):
         if isinstance(result, SyncFuture):
             if not result.done():
                 raise RuntimeError("GraphQL deferred execution failed to complete.")
-            return result.result()
+            try:
+                return result.result()
+            except GraphQLError as error:
+                # A non-null field error propagated through the future chain all
+                # the way to the operation root; record it and null the data,
+                # matching standard graphql-core.
+                self.errors.append(error)
+                return None
 
         return result
+
+    def _settle_field_error(
+        self,
+        future: SyncFuture,
+        raw_error: Exception,
+        field_nodes: List[FieldNode],
+        path: Path,
+        return_type: GraphQLOutputType,
+    ) -> None:
+        """Settle a field's future after its value completion raised.
+
+        Mirrors graphql-core null propagation: a nullable field absorbs the
+        error (it is recorded and the field resolves to null); a non-null field
+        re-raises, which here means failing the future so the error propagates
+        through the chain to the nearest nullable ancestor.
+        """
+        error = located_error(raw_error, field_nodes, path.as_list())
+        try:
+            self.handle_field_error(error, return_type)
+        except GraphQLError:
+            future.set_exception(error)
+        else:
+            future.set_result(None)
+
+    def _record_list_item_error(
+        self,
+        list_future: SyncFuture,
+        raw_error: Exception,
+        field_nodes: List[FieldNode],
+        item_path: Path,
+        item_type: GraphQLOutputType,
+    ) -> bool:
+        """Record a list item's completion error.
+
+        Returns True when the item type is non-null, meaning the whole list is
+        nullified — the list's future is failed so the error propagates to the
+        field's nearest nullable ancestor. Returns False when the item is
+        nullable, in which case the error is recorded and the item is left null.
+        """
+        error = located_error(raw_error, field_nodes, item_path.as_list())
+        try:
+            self.handle_field_error(error, item_type)
+        except GraphQLError:
+            if not list_future.done():
+                list_future.set_exception(error)
+            return True
+        return False
 
     def execute_fields_serially(
         self,
@@ -101,7 +155,15 @@ class DeferredExecutionContext(ExecutionContext):
                         response_name: str, result: SyncFuture, _: None
                     ) -> None:
                         nonlocal unresolved
-                        awaited_result = result.result()
+                        if future.done():
+                            return
+                        try:
+                            awaited_result = result.result()
+                        except Exception as raw_error:
+                            # A non-null child field failed and propagated its
+                            # null here; the whole object is nullified.
+                            future.set_exception(raw_error)
+                            return
                         if awaited_result is not Undefined:
                             results[response_name] = awaited_result
                         else:
@@ -166,11 +228,10 @@ class DeferredExecutionContext(ExecutionContext):
                                     try:
                                         future.set_result(completed.result())
                                     except Exception as raw_error:
-                                        error = located_error(
-                                            raw_error, field_nodes, path.as_list()
+                                        self._settle_field_error(
+                                            future, raw_error, field_nodes, path,
+                                            return_type,
                                         )
-                                        self.handle_field_error(error, return_type)
-                                        future.set_result(None)
 
                                 if completed.done():
                                     process_completed(completed.result())
@@ -180,11 +241,9 @@ class DeferredExecutionContext(ExecutionContext):
                             else:
                                 future.set_result(completed)
                         except Exception as raw_error:
-                            error = located_error(
-                                raw_error, field_nodes, path.as_list()
+                            self._settle_field_error(
+                                future, raw_error, field_nodes, path, return_type
                             )
-                            self.handle_field_error(error, return_type)
-                            future.set_result(None)
 
                     future = SyncFuture()
                     result.add_done_callback(process_result)
@@ -202,9 +261,9 @@ class DeferredExecutionContext(ExecutionContext):
                     try:
                         future.set_result(completed.result())
                     except Exception as raw_error:
-                        error = located_error(raw_error, field_nodes, path.as_list())
-                        self.handle_field_error(error, return_type)
-                        future.set_result(None)
+                        self._settle_field_error(
+                            future, raw_error, field_nodes, path, return_type
+                        )
 
                 if completed.done():
                     return process_completed(completed.result())
@@ -271,6 +330,8 @@ class DeferredExecutionContext(ExecutionContext):
                             _: Any,
                         ) -> None:
                             nonlocal unresolved
+                            if future.done():
+                                return
                             try:
                                 completed = self.complete_value(
                                     item_type,
@@ -291,16 +352,17 @@ class DeferredExecutionContext(ExecutionContext):
                                             item_path: Path,
                                             _: Any,
                                         ) -> None:
+                                            if future.done():
+                                                return
                                             try:
                                                 results[index] = completed.result()
                                             except Exception as raw_error:
-                                                error = located_error(
+                                                self._record_list_item_error(
+                                                    future,
                                                     raw_error,
                                                     field_nodes,
-                                                    item_path.as_list(),
-                                                )
-                                                self.handle_field_error(
-                                                    error, item_type
+                                                    item_path,
+                                                    item_type,
                                                 )
 
                                         completed.add_done_callback(
@@ -314,10 +376,14 @@ class DeferredExecutionContext(ExecutionContext):
                                 else:
                                     results[index] = completed
                             except Exception as raw_error:
-                                error = located_error(
-                                    raw_error, field_nodes, item_path.as_list()
-                                )
-                                self.handle_field_error(error, item_type)
+                                if self._record_list_item_error(
+                                    future,
+                                    raw_error,
+                                    field_nodes,
+                                    item_path,
+                                    item_type,
+                                ):
+                                    return
                             unresolved -= 1
                             if not unresolved:
                                 future.set_result(results)
@@ -345,13 +411,19 @@ class DeferredExecutionContext(ExecutionContext):
                             _: Any,
                         ) -> None:
                             nonlocal unresolved
+                            if future.done():
+                                return
                             try:
                                 results[index] = completed.result()
                             except Exception as raw_error:
-                                error = located_error(
-                                    raw_error, field_nodes, item_path.as_list()
-                                )
-                                self.handle_field_error(error, item_type)
+                                if self._record_list_item_error(
+                                    future,
+                                    raw_error,
+                                    field_nodes,
+                                    item_path,
+                                    item_type,
+                                ):
+                                    return
                             unresolved -= 1
                             if not unresolved:
                                 future.set_result(results)

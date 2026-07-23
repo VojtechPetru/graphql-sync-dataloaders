@@ -54,11 +54,8 @@ class DeferredExecutionContext(ExecutionContext):
         try:
             dataloader_batch_callbacks.run_all_callbacks()
         except GraphQLError as error:
-            # A field completion error (e.g. a non-nullable field resolving to
-            # null, or an unexpected type from a dataloader) propagated out of a
-            # deferred callback. Standard graphql-core records such an error and
-            # nullifies the data; mirror that instead of hiding the real cause
-            # behind a generic "failed to complete" error.
+            # Deferred field completion failed; record it and null the data
+            # like graphql-core, instead of hiding it behind a generic error.
             self.errors.append(error)
             return None
 
@@ -68,9 +65,7 @@ class DeferredExecutionContext(ExecutionContext):
             try:
                 return result.result()
             except GraphQLError as error:
-                # A non-null field error propagated through the future chain all
-                # the way to the operation root; record it and null the data,
-                # matching standard graphql-core.
+                # Non-null error reached the root; record it and null the data.
                 self.errors.append(error)
                 return None
 
@@ -84,12 +79,9 @@ class DeferredExecutionContext(ExecutionContext):
         path: Path,
         return_type: GraphQLOutputType,
     ) -> None:
-        """Settle a field's future after its value completion raised.
-
-        Mirrors graphql-core null propagation: a nullable field absorbs the
-        error (it is recorded and the field resolves to null); a non-null field
-        re-raises, which here means failing the future so the error propagates
-        through the chain to the nearest nullable ancestor.
+        """Settle a field's future after completion raised: a nullable field
+        absorbs the error (resolves null); a non-null field fails the future to
+        propagate to the nearest nullable ancestor.
         """
         error = located_error(raw_error, field_nodes, path.as_list())
         try:
@@ -109,10 +101,8 @@ class DeferredExecutionContext(ExecutionContext):
     ) -> bool:
         """Record a list item's completion error.
 
-        Returns True when the item type is non-null, meaning the whole list is
-        nullified — the list's future is failed so the error propagates to the
-        field's nearest nullable ancestor. Returns False when the item is
-        nullable, in which case the error is recorded and the item is left null.
+        Returns True if the item is non-null (fail the list future to nullify
+        the whole list), False if nullable (error recorded, item left null).
         """
         error = located_error(raw_error, field_nodes, item_path.as_list())
         try:
@@ -160,8 +150,7 @@ class DeferredExecutionContext(ExecutionContext):
                         try:
                             awaited_result = result.result()
                         except Exception as raw_error:
-                            # A non-null child field failed and propagated its
-                            # null here; the whole object is nullified.
+                            # Non-null child failed; nullify the whole object.
                             future.set_exception(raw_error)
                             return
                         if awaited_result is not Undefined:

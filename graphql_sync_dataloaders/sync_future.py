@@ -46,7 +46,14 @@ class SyncFuture:
             raise TypeError("Cannot resolve future with itself.")
 
         if isinstance(result, SyncFuture):
-            result.add_done_callback(self.set_result)
+            if result.done():
+                exception = result.exception()
+                if exception is not None:
+                    self.set_exception(exception)
+                else:
+                    self.set_result(result.result())
+            else:
+                result.add_done_callback(self.set_result)
         else:
             self._assert_state(_PENDING)
             self._result = result

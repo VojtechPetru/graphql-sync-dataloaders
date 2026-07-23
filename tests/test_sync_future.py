@@ -50,3 +50,36 @@ def test_nested_chaining():
     assert f.result() == 1
     assert f2.result() == 2
     assert f3.result() == "2"
+
+
+def test_resolving_with_already_finished_future_propagates_value():
+    """A callback may return a future that has already resolved (e.g. a cache
+    hit whose batch already dispatched). Chaining onto such a future must adopt
+    its value rather than treating it as still pending."""
+    inner = SyncFuture()
+    inner.set_result(42)
+    assert inner.done()
+
+    outer = SyncFuture()
+    chained = outer.then(lambda _: inner)
+    outer.set_result("go")
+
+    assert chained.done()
+    assert chained.result() == 42
+
+
+def test_resolving_with_already_finished_future_propagates_exception():
+    """When a callback returns an already-finished future that failed, the
+    chained future must adopt that exception instead of raising an
+    InvalidStateError while trying to register a callback on it."""
+    inner = SyncFuture()
+    inner.set_exception(ValueError("boom"))
+    assert inner.done()
+
+    outer = SyncFuture()
+    chained = outer.then(lambda _: inner)
+    outer.set_result("go")
+
+    assert chained.done()
+    with pytest.raises(ValueError, match="boom"):
+        chained.result()

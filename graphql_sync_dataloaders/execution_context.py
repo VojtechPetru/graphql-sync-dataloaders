@@ -56,7 +56,7 @@ class DeferredExecutionContext(ExecutionContext):
         except GraphQLError as error:
             # Deferred field completion failed; record it and null the data
             # like graphql-core, instead of hiding it behind a generic error.
-            self.errors.append(error)
+            self.collected_errors.add(error, None)
             return None
 
         if isinstance(result, SyncFuture):
@@ -66,7 +66,7 @@ class DeferredExecutionContext(ExecutionContext):
                 return result.result()
             except GraphQLError as error:
                 # Non-null error reached the root; record it and null the data.
-                self.errors.append(error)
+                self.collected_errors.add(error, None)
                 return None
 
         return result
@@ -85,7 +85,7 @@ class DeferredExecutionContext(ExecutionContext):
         """
         error = located_error(raw_error, field_nodes, path.as_list())
         try:
-            self.handle_field_error(error, return_type)
+            self.handle_field_error(error, return_type, path)
         except GraphQLError:
             future.set_exception(error)
         else:
@@ -106,7 +106,7 @@ class DeferredExecutionContext(ExecutionContext):
         """
         error = located_error(raw_error, field_nodes, item_path.as_list())
         try:
-            self.handle_field_error(error, item_type)
+            self.handle_field_error(error, item_type, item_path)
         except GraphQLError:
             if not list_future.done():
                 list_future.set_exception(error)
@@ -264,7 +264,7 @@ class DeferredExecutionContext(ExecutionContext):
             return completed
         except Exception as raw_error:
             error = located_error(raw_error, field_nodes, path.as_list())
-            self.handle_field_error(error, return_type)
+            self.handle_field_error(error, return_type, path)
             return None
 
     def complete_list_value(
@@ -425,7 +425,7 @@ class DeferredExecutionContext(ExecutionContext):
                     results[index] = completed
             except Exception as raw_error:
                 error = located_error(raw_error, field_nodes, item_path.as_list())
-                self.handle_field_error(error, item_type)
+                self.handle_field_error(error, item_type, item_path)
 
         if not unresolved:
             return results

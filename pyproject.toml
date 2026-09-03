@@ -21,7 +21,10 @@ repository = "https://github.com/jkimbo/graphql-sync-dataloaders"
 
 [tool.poetry.dependencies]
 python = "^3.8"
-graphql-core = "~3.2.0"
+# 3.2.10 replaced `ExecutionContext.errors` with a `CollectedErrors` that drops errors at positions
+# an ancestor already nulled, and gave `handle_field_error` the path it needs to do so. The execution
+# context here overrides both surfaces, so it cannot run against anything earlier.
+graphql-core = ">=3.2.10,<3.3"
 
 [tool.poetry.group.dev.dependencies]
 Django = "^4.1.1"
